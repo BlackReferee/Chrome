@@ -1,9 +1,9 @@
-name: Sync Chrome Offline & Online Installers
+name: Sync Chrome Win64 Installers
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */12 * * *"
+    - cron: "0 */12 * * *"   # 每 12 小时检查更新
 
 jobs:
   sync-chrome:
@@ -13,47 +13,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install jq & curl
-        run: sudo apt-get install -y jq
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl gh
 
-      - name: Prepare
-        run: mkdir downloads
+      - name: Prepare directories
+        run: mkdir -p downloads
 
-      - name: Define Channels
+      - name: Define Chrome channels
         run: |
           echo "CHANNELS=stable beta dev canary" >> $GITHUB_ENV
 
-      - name: Download Chrome Installers
+      - name: Download Chrome EXE files
         run: |
           echo "{}" > versions.json
 
           for channel in $CHANNELS; do
-            echo "=== Processing Channel: $channel ==="
-
             META_URL="https://versionhistory.googleapis.com/v1/chrome/platforms/win64/channels/$channel/versions"
             VERSION=$(curl -s "$META_URL" | jq -r '.versions[0].version')
+            echo "Channel: $channel => Version: $VERSION"
 
-            echo "Latest Version: $VERSION"
-
-            # 保存版本信息到 JSON（用于 Release Notes）
-            jq --arg c "$channel" --arg v "$VERSION" \
-              '. + {($c): $v}' versions.json > tmp.json
+            # 保存版本信息到 JSON
+            jq --arg c "$channel" --arg v "$VERSION" '. + {($c): $v}' versions.json > tmp.json
             mv tmp.json versions.json
 
             OUTFILE="downloads/chrome-${channel}-${VERSION}.exe"
 
             if [ "$channel" = "stable" ]; then
-              # 真离线 EXE
-              DL="https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.exe"
+              # Stable 离线 EXE（完整 ~90MB）
+              DL="https://dl.google.com/tag/s/appguid%7B8A69D345-D564-463C-AFF1-A69D9E530F96%7D&iid%7B00000000-0000-0000-0000-000000000000%7D&lang%7Cen&browser%7C4&usagestats%7C0&appname%7CGoogle%20Chrome/install/googlechromestandaloneenterprise64.exe"
             else
-              # Google 官方在线安装器 (Stub Installer)
-              # 这三个渠道 Google 只提供 online installer
+              # Beta / Dev / Canary 官方在线 EXE
               DL="https://dl.google.com/tag/s/appguid%3D%7B8A69D345-D564-463C-AFF1-A69D9E530F96%7D%26updated%3Dtrue%26installedby%3Dother%26brand%3DGCEU/update2/installers/ChromeSetup.exe"
             fi
 
-            echo "Downloading: $DL"
+            echo "Downloading: $DL → $OUTFILE"
             curl -L "$DL" -o "$OUTFILE"
-            echo "Saved to: $OUTFILE"
+
+            # 检查文件大小，避免 1KB 空文件
+            if [ ! -s "$OUTFILE" ]; then
+              echo "Download failed or file is empty: $OUTFILE"
+              exit 1
+            fi
+
           done
 
       - name: Generate unified tag
@@ -65,26 +68,25 @@ jobs:
       - name: Delete existing release if exists
         continue-on-error: true
         run: |
-          gh release delete "$TAG" -y || true
+          gh release view "$TAG" >/dev/null 2>&1 && gh release delete "$TAG" -y || true
           git push origin :refs/tags/$TAG || true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
 
       - name: Create Release
         run: |
           NOTES=$(cat versions.json | jq -r '
             "### Chrome Win64 Latest Versions\n" +
-            "\n- Stable: "   + .stable +
-            "\n- Beta: "     + .beta +
-            "\n- Dev: "      + .dev +
-            "\n- Canary: "   + .canary + "\n"
+            "\n- Stable: " + .stable +
+            "\n- Beta: " + .beta +
+            "\n- Dev: " + .dev +
+            "\n- Canary: " + .canary
           ')
-
           echo "$NOTES" > release_notes.md
 
           gh release create "$TAG" downloads/* \
-            --title "Chrome Win64 (Stable Offline + Beta/Dev/Canary Online) - $TAG" \
-            --notes-file release_notes.md
-
+            --title "Chrome Win64 EXE Multi-Channel - $TAG" \
+            --notes-file release_notes.md \
+            || echo "Release creation failed or already exists"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
