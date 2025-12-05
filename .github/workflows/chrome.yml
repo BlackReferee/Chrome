@@ -1,0 +1,90 @@
+name: Sync Chrome Offline & Online Installers
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */12 * * *"
+
+jobs:
+  sync-chrome:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq & curl
+        run: sudo apt-get install -y jq
+
+      - name: Prepare
+        run: mkdir downloads
+
+      - name: Define Channels
+        run: |
+          echo "CHANNELS=stable beta dev canary" >> $GITHUB_ENV
+
+      - name: Download Chrome Installers
+        run: |
+          echo "{}" > versions.json
+
+          for channel in $CHANNELS; do
+            echo "=== Processing Channel: $channel ==="
+
+            META_URL="https://versionhistory.googleapis.com/v1/chrome/platforms/win64/channels/$channel/versions"
+            VERSION=$(curl -s "$META_URL" | jq -r '.versions[0].version')
+
+            echo "Latest Version: $VERSION"
+
+            # 保存版本信息到 JSON（用于 Release Notes）
+            jq --arg c "$channel" --arg v "$VERSION" \
+              '. + {($c): $v}' versions.json > tmp.json
+            mv tmp.json versions.json
+
+            OUTFILE="downloads/chrome-${channel}-${VERSION}.exe"
+
+            if [ "$channel" = "stable" ]; then
+              # 真离线 EXE
+              DL="https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.exe"
+            else
+              # Google 官方在线安装器 (Stub Installer)
+              # 这三个渠道 Google 只提供 online installer
+              DL="https://dl.google.com/tag/s/appguid%3D%7B8A69D345-D564-463C-AFF1-A69D9E530F96%7D%26updated%3Dtrue%26installedby%3Dother%26brand%3DGCEU/update2/installers/ChromeSetup.exe"
+            fi
+
+            echo "Downloading: $DL"
+            curl -L "$DL" -o "$OUTFILE"
+            echo "Saved to: $OUTFILE"
+          done
+
+      - name: Generate unified tag
+        id: tag
+        run: |
+          TAG="chrome-win64-$(date +%Y-%m-%d)"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+      - name: Delete existing release if exists
+        continue-on-error: true
+        run: |
+          gh release delete "$TAG" -y || true
+          git push origin :refs/tags/$TAG || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Release
+        run: |
+          NOTES=$(cat versions.json | jq -r '
+            "### Chrome Win64 Latest Versions\n" +
+            "\n- Stable: "   + .stable +
+            "\n- Beta: "     + .beta +
+            "\n- Dev: "      + .dev +
+            "\n- Canary: "   + .canary + "\n"
+          ')
+
+          echo "$NOTES" > release_notes.md
+
+          gh release create "$TAG" downloads/* \
+            --title "Chrome Win64 (Stable Offline + Beta/Dev/Canary Online) - $TAG" \
+            --notes-file release_notes.md
+
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
